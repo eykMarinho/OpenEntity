@@ -101,11 +101,16 @@ stock ECS_RegisterComponent(const name[]) {
  * @return ID da Entidade
  */
 stock ECS_CreateEntity() {
-    // Encontrar slot livre começando de 5000 (reservado para entidades customizadas)
-    // 0-999: Jogadores
-    // 1000-2999: Veículos
-    // 5000+: Customizados
-    for(new i = 5000; i < MAX_ECS_ENTITIES; i++) {
+    // Encontrar slot livre
+    // Tenta começar de 5000 para evitar conflitos com players/veículos
+    // Se MAX_ECS_ENTITIES for pequeno, começa da metade
+    #if MAX_ECS_ENTITIES > 5000
+        new start_index = 5000;
+    #else
+        new start_index = MAX_ECS_ENTITIES / 2; // Fallback seguro
+    #endif
+
+    for(new i = start_index; i < MAX_ECS_ENTITIES; i++) {
         if (!g_EntityActive[i]) {
             g_EntityActive[i] = true;
             g_EntityType[i] = ENTITY_TYPE_CUSTOM;
@@ -187,6 +192,10 @@ stock ECS_RemoveComponent(entity, component) {
         g_PrevEntity[component][next] = prev;
     }
     
+    // Limpar referências (Boa prática para debug)
+    g_NextEntity[component][entity] = -1;
+    g_PrevEntity[component][entity] = -1;
+
     g_EntityHasComponent[entity][component] = false;
     g_ComponentData[component][entity] = 0;
     
@@ -250,6 +259,7 @@ stock ECS_Dump() {
 
 // Auxiliares para cópia de strings
 static stock ECS_Strcpy(dest[], const source[], len = sizeof(dest)) {
+    // strcat concatena, então precisamos limpar o destino primeiro para simular um copy
     dest[0] = '\0';
     strcat(dest, source, len);
 }
