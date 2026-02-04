@@ -27,8 +27,9 @@ CMD:darfome(playerid) {
 
 task ProcessarFome[1000]() {
     // Loop ultra-rápido: roda APENAS em quem tem fome
+    new valor;
     foreach_ecs(i : COMP_FOME) {
-        new valor = ECS_Value(i, COMP_FOME);
+        valor = ECS_Value(i, COMP_FOME);
         ECS_Set(i, COMP_FOME, valor - 1);
     }
 }
