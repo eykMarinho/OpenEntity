@@ -56,4 +56,4 @@ task ProcessarFome[1000]() {
 > *A iteração da OpenEntity é linear e acessa a memória sequencialmente, permitindo que a CPU utilize pré-carregamento (prefetching) de cache de forma eficiente.*
 
 ---
-*Desenvolvido para modernizar o desenvolvimento em Pawn.*
+*Desenvolvido por Marinho @FaelzinRJ.*
