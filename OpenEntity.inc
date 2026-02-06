@@ -1,30 +1,10 @@
 /*
     OpenEntity - Sistema de Entidade-Componente (ECS)
-    Autor: Marinho
+    Autor: Marinho (Refatorado para Sparse Set)
     
     Descrição:
-    Permite que desenvolvedores abandonem enums gigantescos e código espaguete 
-    em favor de uma arquitetura modular baseada em componentes.
-    
-    Funcionalidades:
-    - Entidades Dinâmicas (Jogadores, Veículos, Objetos Customizados)
-    - Anexação/Remoção Rápida de Componentes
-    - Iteração O(N) sobre entidades com componentes específicos
-    - Wrappers com segurança de tipo
-    
-    Uso:
-    
-    new COMP_SAUDE;
-    
-    public OnGameModeInit() {
-        COMP_SAUDE = ECS_RegisterComponent("Saude");
-    }
-    
-    ECS_AddComponent(entity_id, COMP_SAUDE, 100);
-    
-    foreach_ecs(i : COMP_SAUDE) {
-        printf("Entidade %d tem saude %d", i, ECS_Value(i, COMP_SAUDE));
-    }
+    Arquitetura modular baseada em componentes utilizando o padrão Sparse Set 
+    para iteração O(N) em memória contígua e verificação O(1).
 */
 
 #if defined _open_entity_included
@@ -53,37 +33,27 @@
 new 
     g_ComponentCount = 0,
     g_ComponentNames[MAX_ECS_COMPONENTS][32],
-    // Armazenamento de Dados (Inteiro Simples por enquanto, pode ser cast para Float)
     g_ComponentData[MAX_ECS_COMPONENTS][MAX_ECS_ENTITIES],
-    // Bitmask para verificações rápidas de "Tem Componente"
+    
+    // Sparse Set Core
+    g_DenseCount[MAX_ECS_COMPONENTS],
+    g_DenseList[MAX_ECS_COMPONENTS][MAX_ECS_ENTITIES],
+    g_SparseArray[MAX_ECS_COMPONENTS][MAX_ECS_ENTITIES],
     bool:g_EntityHasComponent[MAX_ECS_ENTITIES][MAX_ECS_COMPONENTS],
-    // Lista Encadeada para Iteração Rápida
-    g_FirstEntity[MAX_ECS_COMPONENTS] = {-1, ...},
-    g_NextEntity[MAX_ECS_COMPONENTS][MAX_ECS_ENTITIES] = {-1, ...},
-    g_PrevEntity[MAX_ECS_COMPONENTS][MAX_ECS_ENTITIES] = {-1, ...},
-    // Gerenciamento de Entidade
-    bool:g_EntityActive[MAX_ECS_ENTITIES],
+
+    g_EntityActive[MAX_ECS_ENTITIES],
     g_EntityType[MAX_ECS_ENTITIES];
 
-// Mágica do Iterador para "foreach(new i : ECS_With(comp))"
-// Utilizamos a interface de iterador customizada do YSI ou um loop de macro simplificado
+// Macros de Iteração e Acesso
 #define ECS_With(%1) _ecs_iter:%1
-
-// Acesso direto para alta performance (Sem checagem de segurança)
 #define ECS_Value(%1,%2) (g_ComponentData[%2][%1])
 
-// Implementação de iterador customizado otimizado
-// Acesso direto aos arrays para evitar overhead de chamada de função
+// Iterador Otimizado (Sparse Set)
 #define foreach_ecs(%1:%2) \
-    for (new %1 = g_FirstEntity[%2]; %1 != -1; %1 = g_NextEntity[%2][%1])
+    for (new _idx_%1 = 0, %1; _idx_%1 < g_DenseCount[%2] && (%1 = g_DenseList[%2][_idx_%1]) != -1; _idx_%1++)
 
 // API
 
-/**
- * Registra um novo componente. Deve ser chamado em OnGameModeInit.
- * @param name Nome do componente para depuração
- * @return ID do Componente
- */
 stock ECS_RegisterComponent(const name[]) {
     if (g_ComponentCount >= MAX_ECS_COMPONENTS) {
         printf("[ECS] Erro: Maximo de componentes atingido (%d)", MAX_ECS_COMPONENTS);
@@ -91,23 +61,15 @@ stock ECS_RegisterComponent(const name[]) {
     }
     new id = g_ComponentCount++;
     ECS_Strcpy(g_ComponentNames[id], name);
-    // Inicializar lista
-    g_FirstEntity[id] = -1;
+    g_DenseCount[id] = 0;
     return id;
 }
 
-/**
- * Cria uma nova entidade customizada.
- * @return ID da Entidade
- */
 stock ECS_CreateEntity() {
-    // Encontrar slot livre
-    // Tenta começar de 5000 para evitar conflitos com players/veículos
-    // Se MAX_ECS_ENTITIES for pequeno, começa da metade
     #if MAX_ECS_ENTITIES > 5000
         new start_index = 5000;
     #else
-        new start_index = MAX_ECS_ENTITIES / 2; // Fallback seguro
+        new start_index = MAX_ECS_ENTITIES / 2;
     #endif
 
     for(new i = start_index; i < MAX_ECS_ENTITIES; i++) {
@@ -120,13 +82,9 @@ stock ECS_CreateEntity() {
     return INVALID_ENTITY;
 }
 
-/**
- * Destrói uma entidade e remove todos os seus componentes.
- */
 stock ECS_DestroyEntity(entity) {
     if (entity < 0 || entity >= MAX_ECS_ENTITIES) return 0;
     
-    // Remover todos os componentes
     for(new c = 0; c < g_ComponentCount; c++) {
         if (g_EntityHasComponent[entity][c]) {
             ECS_RemoveComponent(entity, c);
@@ -138,63 +96,41 @@ stock ECS_DestroyEntity(entity) {
     return 1;
 }
 
-/**
- * Adiciona um componente a uma entidade.
- * @param entity O ID da entidade
- * @param component O ID do componente
- * @param value Valor inicial (int/float/bool)
- */
 stock ECS_AddComponent(entity, component, {_,Float}:value = 0) {
     if (entity < 0 || entity >= MAX_ECS_ENTITIES) return 0;
     if (component < 0 || component >= g_ComponentCount) return 0;
     
     if (g_EntityHasComponent[entity][component]) {
-        // Apenas atualizar valor se já existe
         g_ComponentData[component][entity] = _:value;
         return 1;
     }
 
-    // Marcar como ativo
-    g_EntityActive[entity] = true; // Implicitamente ativa a entidade se for jogador/veículo
+    g_EntityActive[entity] = true; 
     g_EntityHasComponent[entity][component] = true;
     g_ComponentData[component][entity] = _:value;
 
-    // Adicionar à Lista Encadeada (Inserir no Início)
-    new oldFirst = g_FirstEntity[component];
-    g_FirstEntity[component] = entity;
-    g_NextEntity[component][entity] = oldFirst;
-    g_PrevEntity[component][entity] = -1;
-    
-    if (oldFirst != -1) {
-        g_PrevEntity[component][oldFirst] = entity;
-    }
+    // Sparse Set Add
+    new count = g_DenseCount[component];
+    g_DenseList[component][count] = entity;
+    g_SparseArray[component][entity] = count;
+    g_DenseCount[component]++;
     
     return 1;
 }
 
-/**
- * Remove um componente de uma entidade.
- */
 stock ECS_RemoveComponent(entity, component) {
     if (!g_EntityHasComponent[entity][component]) return 0;
     
-    // Remover da Lista Encadeada
-    new prev = g_PrevEntity[component][entity];
-    new next = g_NextEntity[component][entity];
-    
-    if (prev != -1) {
-        g_NextEntity[component][prev] = next;
-    } else {
-        g_FirstEntity[component] = next;
-    }
-    
-    if (next != -1) {
-        g_PrevEntity[component][next] = prev;
-    }
-    
-    // Limpar referências (Boa prática para debug)
-    g_NextEntity[component][entity] = -1;
-    g_PrevEntity[component][entity] = -1;
+    // Sparse Set Remove (Swap & Pop)
+    new index = g_SparseArray[component][entity];
+    new lastIndex = g_DenseCount[component] - 1;
+    new lastEntity = g_DenseList[component][lastIndex];
+
+    g_DenseList[component][index] = lastEntity;
+    g_SparseArray[component][lastEntity] = index;
+
+    g_DenseList[component][lastIndex] = INVALID_ENTITY;
+    g_DenseCount[component]--;
 
     g_EntityHasComponent[entity][component] = false;
     g_ComponentData[component][entity] = 0;
@@ -202,64 +138,36 @@ stock ECS_RemoveComponent(entity, component) {
     return 1;
 }
 
-/**
- * Obtém o valor do componente.
- */
 stock ECS_Get(entity, component) {
     if (!g_EntityHasComponent[entity][component]) return 0;
     return g_ComponentData[component][entity];
 }
 
-/**
- * Define o valor do componente.
- */
 stock ECS_Set(entity, component, {_,Float}:value) {
     if (!g_EntityHasComponent[entity][component]) return 0;
     g_ComponentData[component][entity] = _:value;
     return 1;
 }
 
-/**
- * Verifica se a entidade possui o componente.
- */
 stock bool:ECS_Has(entity, component) {
     if (entity < 0 || entity >= MAX_ECS_ENTITIES) return false;
     return g_EntityHasComponent[entity][component];
 }
 
-// Auxiliares de Iteração Interna
-stock ECS_GetFirst(component) {
-    if (component < 0 || component >= g_ComponentCount) return -1;
-    return g_FirstEntity[component];
-}
-
-stock ECS_GetNext(component, current) {
-    return g_NextEntity[component][current];
-}
-
-/**
- * Despeja todas as entidades e componentes ativos no log do servidor.
- * Útil para depuração.
- */
 stock ECS_Dump() {
-    printf("--- ECS Dump ---");
+    printf("--- ECS Dump (Sparse Set) ---");
     printf("Components: %d", g_ComponentCount);
-    for(new i = 0; i < MAX_ECS_ENTITIES; i++) {
-        if (g_EntityActive[i]) {
-            printf("Entity %d (Type: %d):", i, g_EntityType[i]);
-            for(new c = 0; c < g_ComponentCount; c++) {
-                if (g_EntityHasComponent[i][c]) {
-                    printf("  - %s: %d", g_ComponentNames[c], g_ComponentData[c][i]);
-                }
-            }
+    for(new c = 0; c < g_ComponentCount; c++) {
+        printf("Componente '%s' (Count: %d):", g_ComponentNames[c], g_DenseCount[c]);
+        for(new i = 0; i < g_DenseCount[c]; i++) {
+            new entity = g_DenseList[c][i];
+            printf("  [%d] Entity ID: %d | Val: %d", i, entity, g_ComponentData[c][entity]);
         }
     }
     printf("--- End Dump ---");
 }
 
-// Auxiliares para cópia de strings
 static stock ECS_Strcpy(dest[], const source[], len = sizeof(dest)) {
-    // strcat concatena, então precisamos limpar o destino primeiro para simular um copy
     dest[0] = '\0';
     strcat(dest, source, len);
 }
